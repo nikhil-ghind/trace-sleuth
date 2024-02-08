@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "catalog-service"
+    static_configs:
+      - targets: ["catalog:8001"]
+    metrics_path: /metrics
+
+  - job_name: "orders-service"
+    static_configs:
+      - targets: ["orders:8002"]
+    metrics_path: /metrics
+
+  - job_name: "checkout-service"
+    static_configs:
+      - targets: ["checkout:8003"]
+    metrics_path: /metrics
+
+  - job_name: "ai-debugger"
+    static_configs:
+      - targets: ["ai-debugger:8005"]
+    metrics_path: /metrics
