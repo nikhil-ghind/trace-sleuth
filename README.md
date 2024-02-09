@@ -150,6 +150,48 @@ curl -X POST http://localhost:8003/checkout/ \
 2. Import the dashboard from `monitoring/grafana/dashboard.json`
 3. Panels: request rate per service, error rate, latency percentiles (p50/p95/p99), checkout conversion rate
 
+## Tests / End-to-End Check
+
+There is no committed unit test suite; validate the deployment with the following smoke flow:
+
+```bash
+# 1. Bring up the stack
+cd deploy && docker-compose up --build -d
+
+# 2. Wait for all services to register, then drive load
+for i in $(seq 1 50); do
+  curl -s -X POST http://localhost:8003/checkout/ \
+    -H "Content-Type: application/json" \
+    -d '{"items":[{"product_id":"prod-001","quantity":1}],"customer_id":"u1"}' &
+done; wait
+
+# 3. Verify a distributed trace is recorded in Jaeger
+curl -s "http://localhost:16686/api/traces?service=checkout-service&limit=1" | jq '.data | length'
+
+# 4. Run an AI investigation and inspect the structured response
+curl -s -X POST http://localhost:8005/debug/investigate \
+  -H "Content-Type: application/json" \
+  -d '{"issue":"Some checkouts failing"}' | jq .
+```
+
+## Evaluation (AI Debugger)
+
+The AI debugger is an MCP-tool-using LLM agent that produces root-cause summaries from Jaeger
+traces and Prometheus metrics. Treat it as an LLM/RAG retrieval-and-reasoning task and
+evaluate offline:
+
+| Metric | How to compute |
+|--------|----------------|
+| Retrieval recall | For each fault scenario, label the trace IDs / metric series that are causally relevant; measure fraction returned by the agent's tool calls |
+| Root-cause exact match | Compare the agent's `root_cause` field against a labelled ground-truth service+failure-mode label per scenario |
+| Faithfulness | Manually score whether every claim in the summary is supported by the traces/metrics actually retrieved (no hallucinated spans) |
+| Latency p50 / p99 | Wrap `/debug/investigate` calls in a timing harness over N=100 scenarios |
+| Heuristic vs. LLM lift | Run the same scenarios with and without `OPENAI_API_KEY` set; compare recall and exact match |
+
+Build the labelled scenario set by reusing the injected faults already exercised in the load
+script above (5% payment failure, product-not-found, latency spike) and recording the expected
+root cause for each.
+
 ## Service Details
 
 - **Catalog** (8001): Product CRUD with in-memory store. Custom spans for product lookup.
