@@ -4,33 +4,77 @@ An observability platform with 3 FastAPI microservices instrumented with OpenTel
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    client["Client"]
+
+    subgraph svcs["FastAPI microservices, each with setup_tracing"]
+        co["checkout-service :8003<br/>validate_cart &#8594; place_order &#8594; process_payment"]
+        ca["catalog-service :8001<br/>GET /products/{id}"]
+        or["orders-service :8002<br/>validate_products, create_order"]
+    end
+
+    otel["OpenTelemetry SDK<br/>FastAPIInstrumentor + HTTPXClientInstrumentor<br/>W3C trace-context propagated on every httpx call<br/>BatchSpanProcessor &#8594; OTLP gRPC"]
+    jaeger["Jaeger<br/>:4317 OTLP ingest, :16686 UI + query API"]
+    kafka["Kafka topic order.created"]
+    prom["Prometheus :9090"]
+    graf["Grafana :3000"]
+
+    subgraph dbg["AI debugger :8005"]
+        srv["server.py<br/>POST /debug/investigate<br/>GET /debug/health-check<br/>GET /debug/recent-errors"]
+        agent["DebugAgent<br/>LLM path: gpt-4o function calling,<br/>up to 10 tool rounds<br/>heuristic path when no API key"]
+        tools["tools.py<br/>query_traces, get_trace_detail,<br/>get_error_spans, get_service_metrics,<br/>compare_traces"]
+        rep["DebugReport<br/>root cause, affected services,<br/>timeline, recommendation"]
+    end
+
+    client --> co
+    co -->|"HTTP, trace context in headers"| ca
+    co -->|"HTTP, trace context in headers"| or
+    or -->|"send_and_wait"| kafka
+    co --> otel
+    ca --> otel
+    or --> otel
+    otel --> jaeger
+    svcs --> prom --> graf
+    srv --> agent --> tools
+    tools -->|"Jaeger query API"| jaeger
+    tools -->|"PromQL"| prom
+    agent --> rep --> srv
 ```
-                          +-----------+
-                          |  Checkout |:8003
-                          |  Service  |
-                          +-----+-----+
-                           /         \
-                    HTTP  /           \  HTTP
-                         v             v
-                  +--------+      +--------+
-                  | Catalog|:8001 | Orders |:8002
-                  | Service|      | Service|----> Kafka (order.created)
-                  +--------+      +--------+
-                       \             /
-                  OTLP  \           / OTLP
-                         v         v
-                      +-------------+
-                      |   Jaeger    |:16686 (UI) / :4317 (OTLP)
-                      +------+------+
-                             |
-                      +------+------+
-                      | AI Debugger |:8005
-                      | (MCP Agent) |
-                      +------+------+
-                             |
-                      +------+------+
-                      | Prometheus  |:9090 ──> Grafana :3000
-                      +-------------+
+
+A single checkout, as it appears in one trace:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CO as checkout-service
+    participant CA as catalog-service
+    participant OR as orders-service
+    participant K as Kafka
+    participant J as Jaeger
+
+    C->>CO: POST /checkout/
+    activate CO
+    Note over CO: span validate_cart
+    loop per cart item
+        CO->>CA: GET /products/{id}
+        CA-->>CO: product or 404
+    end
+    Note over CO: a 404 sets the span status to ERROR<br/>and aborts the checkout
+    Note over CO: span create_order
+    CO->>OR: POST /orders/
+    activate OR
+    Note over OR: spans validate_products and create_order<br/>attributes order.id, order.total, order.item_count
+    OR->>K: publish order.created
+    OR-->>CO: order
+    deactivate OR
+    Note over CO: span process_payment<br/>2 s simulated gateway latency, 5% decline rate
+    CO-->>C: checkout result
+    deactivate CO
+    CO->>J: batched span export over OTLP
+    CA->>J: batched span export
+    OR->>J: batched span export
+    Note over J: all spans share one trace id because<br/>httpx instrumentation propagates the context
 ```
 
 **Trace propagation:** Checkout calls Catalog and Orders via HTTP. OpenTelemetry auto-instrumentation on httpx propagates W3C trace-context headers, creating a single distributed trace across all 3 services. Each service adds custom spans with business attributes (order.id, product.id, payment.status).
